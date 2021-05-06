@@ -32,68 +32,90 @@ type KeyValue struct {
 //
 // use ihash(key) % NReduce to choose the reduce
 // task number for each KeyValue emitted by Map.
-// 不同 key 就分到不同的 NReduce 份下去了，然后针对每一份里的 key 进行 reduce
-// 这样分有什么道理吗？这个份最终还是以文件存储吗？
+//
 func ihash(key string) int {
 	h := fnv.New32a()
 	h.Write([]byte(key))
 	return int(h.Sum32() & 0x7fffffff)
 }
 
-func DivideIntoItems(pairs []KeyValue) []Item {
-	items := []Item{{Key: pairs[0].Key, Values: []string{pairs[0].Value}}}
+func divideIntoItems(pairs []KeyValue) []KeyValues {
+	first := KeyValues{Key: pairs[0].Key, Values: []string{pairs[0].Value}}
+	items := []KeyValues{first}
 	for _, p := range pairs {
 		last := &items[len(items)-1]
 		if p.Key == last.Key {
 			last.Values = append(last.Values, p.Value)
 		} else {
-			i := Item{Key: p.Key, Values: []string{p.Value}}
+			i := KeyValues{Key: p.Key, Values: []string{p.Value}}
 			items = append(items, i)
 		}
 	}
 	return items
 }
 
-// TODO 要测试下
 func readFrom(reader *bufio.Reader) (bool, string, []string) {
 	line, e := reader.ReadString('\n')
+	// fmt.Println("read line ", line)
 	words := strings.Fields(line) // 这里会在 words 里保留换行符吗？
-	return e == io.EOF, words[0], words[1:]
+	end := e == io.EOF
+	if !end {
+		return end, words[0], words[1:]
+	} else {
+		return end, "", nil
+	}
 }
 
 //
 // main/mrworker.go calls this function.
 //
 func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string) string) {
-	var task Task
+	client := MakeRpcClient()
+	defer client.Close()
 	for {
 		// 对端的 server 如果退出了，下面这个会有什么反应
-		call("Coordinator.RequestTask", nil, &task)
+		task := Task{TaskKind: ReduceTaskFlag, TaskId: "10"}
+
+		fmt.Println("request task")
+		status := client.Call("Coordinator.RequestTask", struct{}{}, &task)
+		// fmt.Println("Get response", task)
+		if status == false {
+			break
+		}
 
 		switch task.TaskKind {
 		case MapTaskFlag:
-			intermediate := mapf(task.File, ReadFileToString(task.File))
+			fmt.Println("get map task ", task.TaskId)
+			intermediate := mapf(task.File, readFileToString(task.File))
+			fmt.Println("map task done")
 			sort.Sort(ByKey(intermediate))
-			r := MapResult{TaskId: task.TaskId, Items: DivideIntoItems(intermediate)}
-			call("Coordinator.UploadMapResult", r, nil)
+			r := MapResult{TaskId: task.TaskId, Items: divideIntoItems(intermediate)}
+			client.Call("Coordinator.UploadMapResult", r, nil)
+			fmt.Println("map result upload")
 
 		case ReduceTaskFlag:
-			filename := fmt.Sprint("reduce-result-", task.TaskId)
+			fmt.Println("get reduce task ", task.TaskId)
+			filename := fmt.Sprint("mr-out-", task.TaskId)
 			f, _ := os.Create(filename)
 			defer f.Close()
-			reader := bufio.NewReader(f)
+			argFile, _ := os.Open(task.File)
+			reader := bufio.NewReader(argFile)
 
 			for {
 				end, k, vs := readFrom(reader)
 				if end {
 					break
 				}
+				// fmt.Println("key: ", k, "values: ", vs)
+
 				v := reducef(k, vs)
-				f.WriteString(v)
+				fmt.Fprintf(f, "%v %v\n", k, v)
 			}
 
 			result := ReduceResult{TaskId: task.TaskId, Filename: filename}
-			call("Coordinator.UploadReduceResult", result, nil)
+			client.Call("Coordinator.UploadReduceResult", result, nil)
+			fmt.Println("reduce result upload")
+
 		case ShutdownFlag:
 			fallthrough
 		default:
@@ -102,7 +124,7 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 	}
 }
 
-func ReadFileToString(filename string) string {
+func readFileToString(filename string) string {
 	file, err := os.Open(filename)
 	if err != nil {
 		log.Fatalf("cannot open %v", filename)
@@ -113,27 +135,4 @@ func ReadFileToString(filename string) string {
 		log.Fatalf("cannot read %v", filename)
 	}
 	return string(content)
-}
-
-//
-// example function to show how to make an RPC call to the coordinator.
-//
-// the RPC argument and reply types are defined in rpc.go.
-//
-func CallExample() {
-
-	// declare an argument structure.
-	// args := ExampleArgs{}
-
-	// fill in the argument(s).
-	// args.X = 99
-
-	// declare a reply structure.
-	// reply := ExampleReply{}
-
-	// send the RPC request, wait for the reply.
-	// call("Coordinator.Example", &args, &reply)
-
-	// reply.Y should be 100.
-	// fmt.Printf("reply.Y %v\n", reply.Y)
 }

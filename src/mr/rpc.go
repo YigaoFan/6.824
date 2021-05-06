@@ -9,7 +9,6 @@ package mr
 import (
 	"fmt"
 	"log"
-	"net"
 	"net/rpc"
 	"os"
 	"strconv"
@@ -19,25 +18,24 @@ const MapTaskFlag int = 10
 const ReduceTaskFlag int = 20
 const ShutdownFlag int = 30
 
-// Id stored on coordinator
 type Task struct {
 	File     string
 	TaskKind int
-	TaskId   int
+	TaskId   string
 }
 
-type Item struct {
+type KeyValues struct {
 	Key    string
 	Values []string
 }
 
 type MapResult struct {
-	TaskId int
-	Items  []Item
+	TaskId string
+	Items  []KeyValues
 }
 
 type ReduceResult struct {
-	TaskId   int
+	TaskId   string
 	Filename string
 }
 
@@ -61,7 +59,7 @@ func (client *RpcClient) Call(funcName string, args interface{}, reply interface
 		return true
 	}
 
-	fmt.Println(err)
+	fmt.Println("call error", err)
 	return false
 }
 
@@ -73,7 +71,9 @@ func (client *RpcClient) Close() {
 }
 
 func MakeRpcClient() RpcClient {
-	c, err := rpc.Dial("tcp", ":1234")
+	// c, err := rpc.Dial("tcp", ":1234")
+	sockname := coordinatorSock()
+	c, err := rpc.DialHTTP("unix", sockname)
 	if err != nil {
 		log.Fatal("dialing:", err)
 	}
@@ -81,43 +81,43 @@ func MakeRpcClient() RpcClient {
 	return RpcClient{c}
 }
 
-func StartRpcServerOf(obj interface{}) {
-	rpc.Register(obj)
-	l, e := net.Listen("tcp", ":1234")
-	if e != nil {
-		log.Fatal("listen error:", e)
-	}
+// func StartRpcServerOf(obj interface{}) {
+// 	rpc.Register(obj)
+// 	l, e := net.Listen("tcp", ":1234")
+// 	if e != nil {
+// 		log.Fatal("listen error:", e)
+// 	}
 
-	for {
-		conn, err := l.Accept()
-		// 保存这个连接
-		if err != nil {
-			log.Fatal("accept error:", err)
-		}
-		// rpc 主要用来获得 map 和 reduce 的结果会比较方便
-		go rpc.ServeConn(conn)
-	}
-}
+// 	for {
+// 		conn, err := l.Accept()
+// 		// 保存这个连接
+// 		if err != nil {
+// 			log.Fatal("accept error:", err)
+// 		}
+// 		// rpc 主要用来获得 map 和 reduce 的结果会比较方便
+// 		go rpc.ServeConn(conn)
+// 	}
+// }
 
 //
 // send an RPC request to the coordinator, wait for the response.
 // usually returns true.
 // returns false if something goes wrong.
 //
-func call(rpcname string, args interface{}, reply interface{}) bool {
-	c, err := rpc.Dial("tcp", ":1234")
-	if err != nil {
-		log.Fatal("dialing:", err)
-	}
-	// sockname := coordinatorSock()
-	// c, err := rpc.DialHTTP("unix", sockname)
-	defer c.Close()
+// func call(rpcname string, args interface{}, reply interface{}) bool {
+// 	c, err := rpc.Dial("tcp", ":1234")
+// 	if err != nil {
+// 		log.Fatal("dialing:", err)
+// 	}
+// 	// sockname := coordinatorSock()
+// 	// c, err := rpc.DialHTTP("unix", sockname)
+// 	defer c.Close()
 
-	err = c.Call(rpcname, args, reply)
-	if err == nil {
-		return true
-	}
+// 	err = c.Call(rpcname, args, reply)
+// 	if err == nil {
+// 		return true
+// 	}
 
-	fmt.Println(err)
-	return false
-}
+// 	fmt.Println(err)
+// 	return false
+// }

@@ -5,33 +5,40 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"net/rpc"
 	"os"
+	"strconv"
+	"sync"
 	"time"
 )
 
+type Counter struct {
+	Num int
+	sync.Mutex
+}
+
+// 下列涉及数据竞争
+// TaskKind 刷新 kind 的时候，在 map 完成的时候，可能有线程想查询，这里是不是要有优先级
+// TaskStatus 查询、刷新 status 的时候，在 map 或者 reduce 任务完成的时候
+// RemainTasksCount 更新，别的线程会查询
+// KeyValueSet 更新
 type Coordinator struct {
-	TaskKind         int
-	TaskStatus       []bool
-	ReduceNum        int
-	RemainTasksCount int
+	TaskKind             int
+	TaskKindLock         sync.Mutex
+	TaskStatus           []bool
+	TaskStatusLock       []sync.Mutex
+	ReduceNum            int
+	RemainTasksCount     int
+	RemainTasksCountLock sync.Mutex
+	KeyValueSet          map[string][]string
+	KeyValueSetLock      sync.Mutex
 
 	WaitingTasks chan Task
-	KeyValueSet  map[string][]string
 }
 
-func WorkFlow() {
-	// 得有个同步所有线程的操作，因为要知道所有 map 或者 reduce 任务都完成了，
-	// 然后再分配下一步的任务下去或者结束
-	// coordinator 这边一直有个线程与 worker 同步
-	// when each worker goes online, register on server
-	// assign map task to worker
-	// receive map task result from worker
-	// combine this task result then distribute to n reduce task
-	// assign these reduce tasks to worker
-	// combine reduce tasks result
-	// send shutdown task to all alive workers
-}
+// TODO
+// 看论文 reduce 的结果怎么合并到文件的，看老师提供的单线程样板
 
 //
 // create a Coordinator.
@@ -40,7 +47,8 @@ func WorkFlow() {
 //
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{
-		ReduceNum: nReduce,
+		ReduceNum:   nReduce,
+		KeyValueSet: make(map[string][]string),
 	}
 
 	c.setupMapTask(files)
@@ -48,58 +56,121 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	return &c
 }
 
+// TODO 为什么程序没有自动结束
+
 //
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 //
-func (c *Coordinator) Done() bool {
+func (c *Coordinator) Done(withLog bool) bool {
+	c.TaskKindLock.Lock()
+	if withLog {
+		Log("Obtain TaskKindLock")
+	}
+	defer c.TaskKindLock.Unlock()
+	c.RemainTasksCountLock.Lock()
+	if withLog {
+		Log("Obtain RemainTasksCountLock")
+	}
+	defer c.RemainTasksCountLock.Unlock()
 	return c.TaskKind == ReduceTaskFlag && c.RemainTasksCount == 0
 }
 
 func (c *Coordinator) RequestTask(_, task *Task) error {
-	if c.Done() {
+	fmt.Println("Query work done")
+	if c.Done(true) {
 		task.TaskKind = ShutdownFlag
 		task.File = ""
-		task.TaskId = 0
+		task.TaskId = strconv.Itoa(0)
 		return nil
 	}
 
-	t := <-c.WaitingTasks
-	task.File = t.File
-	task.TaskId = t.TaskId
-	task.TaskKind = t.TaskKind
+	fmt.Println("Waiting count", len(c.WaitingTasks))
+	t, ok := <-c.WaitingTasks
+	if !ok {
+		task.TaskKind = ShutdownFlag
+		task.File = ""
+		task.TaskId = strconv.Itoa(0)
+		return nil
+	}
 
-	defer c.assignToNewWorkerIfTimeOut(t, 10)
+	*task = Task{
+		TaskKind: t.TaskKind,
+		TaskId:   t.TaskId,
+		File:     t.File,
+	}
+	fmt.Println("Assign task", task.TaskId)
+
+	fmt.Println("Monitor task status")
+	go c.assignToNewWorkerIfTimeOut(t, 10)
 	return nil
 }
 
 func (c *Coordinator) UploadMapResult(result MapResult, _ *struct{}) error {
-	if c.RemainTasksCount == 0 || c.TaskStatus[result.TaskId] == true {
+	// 多线程查询变量然后依据不同去更改这个变量
+	// 下面这里查询，后面位置又更新了这个为 true
+	// 可能别的线程在这个查询后，将其更新为 true
+	// 所以要保证这个 TaskStatus 项的访问唯一
+
+	c.TaskKindLock.Lock()
+	if c.TaskKind != MapTaskFlag {
+		return nil
+	}
+	c.RemainTasksCountLock.Lock()
+	if c.RemainTasksCount == 0 { // RemainTasksCount 和 TaskStatusLock 有可能造成死锁？
+		return nil
+	}
+	id, _ := strconv.Atoi(result.TaskId)
+	c.TaskStatusLock[id].Lock()
+	if c.TaskStatus[id] == true {
 		// 表示迟来的结果，已经有 worker 做完了，这个才发过来
 		return nil
 	}
-
-	// 这里要测试下下面这段代码的作用
-	for _, item := range result.Items {
-		k := item.Key
-		c.KeyValueSet[k] = append(c.KeyValueSet[k], item.Values...)
-	}
-
-	c.TaskStatus[result.TaskId] = true
+	c.TaskStatus[id] = true
+	c.TaskStatusLock[id].Unlock()
 	c.RemainTasksCount--
 	if c.RemainTasksCount == 0 {
 		c.setupReduceTask()
+		close(c.WaitingTasks)
 	}
+	c.RemainTasksCountLock.Unlock()
+	c.TaskKindLock.Unlock()
+
+	c.KeyValueSetLock.Lock()
+	for _, item := range result.Items {
+		k := item.Key
+		if ele, ok := c.KeyValueSet[k]; ok {
+			c.KeyValueSet[k] = append(ele, item.Values...)
+		} else {
+			c.KeyValueSet[k] = item.Values
+		}
+	}
+	c.KeyValueSetLock.Unlock()
 
 	return nil
 }
 
 func (c *Coordinator) UploadReduceResult(result ReduceResult, _ *struct{}) error {
-	if c.RemainTasksCount == 0 || c.TaskStatus[result.TaskId] == true {
-		// 表示迟来的结果，已经有 worker 做完了，这个才发过来
+	Log("Try to get TaskKindLock")
+	c.TaskKindLock.Lock()
+	defer c.TaskKindLock.Unlock()
+	if c.TaskKind != ReduceTaskFlag {
 		return nil
 	}
-	c.TaskStatus[result.TaskId] = true
+	Log("Try to get RemainTasksCountLock")
+	c.RemainTasksCountLock.Lock()
+	defer c.RemainTasksCountLock.Unlock()
+	if c.RemainTasksCount == 0 {
+		return nil
+	}
+	id, _ := strconv.Atoi(result.TaskId)
+	Log("Try to get TaskStatusLock")
+	c.TaskStatusLock[id].Lock()
+	defer c.TaskStatusLock[id].Unlock()
+	if c.TaskStatus[id] == true {
+		return nil
+	}
+	c.TaskStatus[id] = true
 	c.RemainTasksCount--
 
 	return nil
@@ -116,87 +187,96 @@ func (c *Coordinator) UploadReduceResult(result ReduceResult, _ *struct{}) error
 // }
 
 //
+// no race
 // start a thread that listens for RPCs from worker.go
 //
 func (c *Coordinator) server() {
 	rpc.Register(c)
-	l, e := net.Listen("tcp", ":1234")
+	rpc.HandleHTTP()
+	// l, e := net.Listen("tcp", ":1234")
+	sockname := coordinatorSock()
+	os.Remove(sockname)
+	l, e := net.Listen("unix", sockname)
 	if e != nil {
 		log.Fatal("listen error:", e)
 	}
 
-	// 下面这个是干嘛
-	// sockname := coordinatorSock()
-	// os.Remove(sockname)
-	// l, e := net.Listen("unix", sockname)
-	// if e != nil {
-	// 	log.Fatal("listen error:", e)
-	// }
+	go http.Serve(l, nil)
 
-	// go http.Serve(l, nil)
-
-	go func() {
-		for {
-			conn, err := l.Accept()
-			// 保存这个连接
-			if err != nil {
-				log.Fatal("accept error:", err)
-			}
-			// rpc 主要用来获得 map 和 reduce 的结果会比较方便
-			go rpc.ServeConn(conn)
-		}
-	}()
+	// go func() {
+	// 	for {
+	// 		conn, err := l.Accept()
+	// 		// 保存这个连接
+	// 		if err != nil {
+	// 			log.Fatal("accept error:", err)
+	// 		}
+	// 		// rpc 主要用来获得 map 和 reduce 的结果会比较方便
+	// 		go rpc.ServeConn(conn)
+	// 	}
+	// }()
 }
 
+// no race
 func (c *Coordinator) setupMapTask(files []string) {
 	n := len(files)
 	c.TaskKind = MapTaskFlag
 	c.RemainTasksCount = n
 	c.WaitingTasks = make(chan Task, len(files))
 	c.TaskStatus = make([]bool, n)
+	c.TaskStatusLock = make([]sync.Mutex, n)
 
 	for i := 0; i < n; i++ {
 		c.TaskStatus[i] = false
 		t := Task{
 			File:     files[i],
-			TaskId:   i,
+			TaskId:   strconv.Itoa(i),
 			TaskKind: MapTaskFlag,
 		}
 		c.WaitingTasks <- t
 	}
 }
 
+// no race
 func getReduceArgFilenameOf(id int) string {
 	return fmt.Sprint("reduce-arg-", id)
 }
 
 func (c *Coordinator) setupReduceTask() {
-	// 这时候如果有 worker 来访问怎么办，要处理下 TODO
 	n := c.ReduceNum
 	c.TaskKind = ReduceTaskFlag
 	c.RemainTasksCount = n
-	c.WaitingTasks = make(chan Task, n)
+	c.WaitingTasks = make(chan Task, n*2) // more space for duplicate task(need?)
 	c.TaskStatus = make([]bool, n)
+	c.TaskStatusLock = make([]sync.Mutex, n)
 
-	var reduceArgFileWriters []*os.File
-	for i := 0; i < n; i++ {
-		filename := getReduceArgFilenameOf(i)
-		f, _ := os.Create(filename)
-		reduceArgFileWriters = append(reduceArgFileWriters, f)
-	}
+	// Prepare arg files
+	{
+		var argFiles []*os.File
+		for i := 0; i < n; i++ {
+			filename := getReduceArgFilenameOf(i)
+			f, _ := os.Create(filename)
+			argFiles = append(argFiles, f)
+		}
 
-	for k, vs := range c.KeyValueSet {
-		i := ihash(k) % c.ReduceNum
-		appendTo(reduceArgFileWriters[i], k, vs)
+		for k, vs := range c.KeyValueSet {
+			i := ihash(k) % c.ReduceNum
+			appendLineTo(argFiles[i], k, vs)
+		}
+
+		for _, f := range argFiles {
+			f.Close()
+		}
 	}
 
 	// 想一下，当某个任务失败时，这些文件怎么处理
 	for i := 0; i < n; i++ {
+		fmt.Println("prepare reduce task ", i)
 		c.TaskStatus[i] = false
 		filename := getReduceArgFilenameOf(i)
+		// below chan will ref this i, so copy to j
 		t := Task{
 			File:     filename,
-			TaskId:   i,
+			TaskId:   strconv.Itoa(i),
 			TaskKind: ReduceTaskFlag,
 		}
 
@@ -204,25 +284,39 @@ func (c *Coordinator) setupReduceTask() {
 	}
 }
 
-func appendTo(writer io.Writer, key string, values []string) {
-	write := func(s string) {
+// no race
+// 这里有问题
+func appendLineTo(writer io.Writer, key string, values []string) {
+	write := func(s string, isLineEnd bool) {
 		n, e := io.WriteString(writer, s)
 		if n != len(s) || e != nil {
 			panic(e)
 		}
-		divider := " "
-		io.WriteString(writer, divider)
+		if !isLineEnd {
+			divider := " "
+			io.WriteString(writer, divider)
+		}
 	}
-	write(key)
+	write(key, false)
 	for _, v := range values {
-		write(v)
+		write(v, false)
 	}
-	write("\n")
+	write("\n", true)
 }
 
 func (c *Coordinator) assignToNewWorkerIfTimeOut(task Task, seconds int) {
 	time.Sleep(time.Duration(seconds) * time.Second)
-	done := c.TaskStatus[task.TaskId]
+	c.TaskKindLock.Lock()
+	if c.TaskKind != task.TaskKind {
+		return
+	}
+
+	id, _ := strconv.Atoi(task.TaskId)
+	c.TaskStatusLock[id].Lock()
+	done := c.TaskStatus[id]
+	c.TaskStatusLock[id].Unlock()
+	c.TaskKindLock.Unlock()
+
 	if !done {
 		c.WaitingTasks <- task
 		go c.assignToNewWorkerIfTimeOut(task, seconds)
@@ -230,3 +324,7 @@ func (c *Coordinator) assignToNewWorkerIfTimeOut(task Task, seconds int) {
 }
 
 // 使用互斥量互斥访问一些共享变量以及一些可能共同调用的过程，比如 setupReduceTask()
+
+func Log(message string) {
+	fmt.Println(message)
+}
