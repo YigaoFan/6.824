@@ -14,7 +14,7 @@ import (
 
 // 凡是个类型都要像下面这样声明一套可以排序的接口，很麻烦吧？
 // for sorting by key.
-type ByKey []KeyValue
+type ByKey []Pair
 
 // for sorting by key.
 func (a ByKey) Len() int           { return len(a) }
@@ -22,9 +22,9 @@ func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 //
-// Map functions return a slice of KeyValue.
+// Map functions return a slice of Pair.
 //
-type KeyValue struct {
+type Pair struct {
 	Key   string
 	Value string
 }
@@ -39,15 +39,15 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
-func divideIntoItems(pairs []KeyValue) []KeyValues {
-	first := KeyValues{Key: pairs[0].Key, Values: []string{pairs[0].Value}}
-	items := []KeyValues{first}
-	for _, p := range pairs {
+func divideIntoItems(pairs []Pair) []Set {
+	first := Set{Key: pairs[0].Key, Values: []string{pairs[0].Value}}
+	items := []Set{first}
+	for _, p := range pairs[1:] {
 		last := &items[len(items)-1]
 		if p.Key == last.Key {
 			last.Values = append(last.Values, p.Value)
 		} else {
-			i := KeyValues{Key: p.Key, Values: []string{p.Value}}
+			i := Set{Key: p.Key, Values: []string{p.Value}}
 			items = append(items, i)
 		}
 	}
@@ -69,14 +69,14 @@ func readFrom(reader *bufio.Reader) (bool, string, []string) {
 //
 // main/mrworker.go calls this function.
 //
-func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string) string) {
+func Worker(mapf func(string, string) []Pair, reducef func(string, []string) string) {
 	client := MakeRpcClient()
 	defer client.Close()
 	for {
 		// 对端的 server 如果退出了，下面这个会有什么反应
 		task := Task{TaskKind: ReduceTaskFlag, TaskId: "10"}
 
-		fmt.Println("request task")
+		// fmt.Println("request task")
 		status := client.Call("Coordinator.RequestTask", struct{}{}, &task)
 		// fmt.Println("Get response", task)
 		if status == false {
