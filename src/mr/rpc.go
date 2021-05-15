@@ -24,14 +24,14 @@ type Task struct {
 	TaskId   string
 }
 
-type KeyValues struct {
+type Set struct {
 	Key    string
 	Values []string
 }
 
 type MapResult struct {
 	TaskId string
-	Items  []KeyValues
+	Items  []Set
 }
 
 type ReduceResult struct {
