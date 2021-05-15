@@ -18,9 +18,9 @@ import (
 // The map function is called once for each file of input.
 // This map function just returns 1 for each file
 //
-func Map(filename string, contents string) []mr.KeyValue {
-	kva := []mr.KeyValue{}
-	kva = append(kva, mr.KeyValue{filename, "1"})
+func Map(filename string, contents string) []mr.Pair {
+	kva := []mr.Pair{}
+	kva = append(kva, mr.Pair{filename, "1"})
 	return kva
 }
 

@@ -7,12 +7,15 @@ package main
 // go build -buildmode=plugin rtiming.go
 //
 
-import "6.824/mr"
-import "fmt"
-import "os"
-import "syscall"
-import "time"
-import "io/ioutil"
+import (
+	"fmt"
+	"io/ioutil"
+	"os"
+	"syscall"
+	"time"
+
+	"6.824/mr"
+)
 
 func nparallel(phase string) int {
 	// create a file so that other workers will see that
@@ -59,19 +62,19 @@ func nparallel(phase string) int {
 	return ret
 }
 
-func Map(filename string, contents string) []mr.KeyValue {
+func Map(filename string, contents string) []mr.Pair {
 
-	kva := []mr.KeyValue{}
-	kva = append(kva, mr.KeyValue{"a", "1"})
-	kva = append(kva, mr.KeyValue{"b", "1"})
-	kva = append(kva, mr.KeyValue{"c", "1"})
-	kva = append(kva, mr.KeyValue{"d", "1"})
-	kva = append(kva, mr.KeyValue{"e", "1"})
-	kva = append(kva, mr.KeyValue{"f", "1"})
-	kva = append(kva, mr.KeyValue{"g", "1"})
-	kva = append(kva, mr.KeyValue{"h", "1"})
-	kva = append(kva, mr.KeyValue{"i", "1"})
-	kva = append(kva, mr.KeyValue{"j", "1"})
+	kva := []mr.Pair{}
+	kva = append(kva, mr.Pair{"a", "1"})
+	kva = append(kva, mr.Pair{"b", "1"})
+	kva = append(kva, mr.Pair{"c", "1"})
+	kva = append(kva, mr.Pair{"d", "1"})
+	kva = append(kva, mr.Pair{"e", "1"})
+	kva = append(kva, mr.Pair{"f", "1"})
+	kva = append(kva, mr.Pair{"g", "1"})
+	kva = append(kva, mr.Pair{"h", "1"})
+	kva = append(kva, mr.Pair{"i", "1"})
+	kva = append(kva, mr.Pair{"j", "1"})
 	return kva
 }
 
