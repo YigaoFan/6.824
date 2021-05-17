@@ -27,6 +27,6 @@ func main() {
 	for m.Done(false) == false {
 		time.Sleep(time.Second)
 	}
-
+	mr.Log("coordinator exit")
 	time.Sleep(time.Second)
 }

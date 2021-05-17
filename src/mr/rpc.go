@@ -7,7 +7,6 @@ package mr
 //
 
 import (
-	"fmt"
 	"log"
 	"net/rpc"
 	"os"
@@ -59,7 +58,7 @@ func (client *RpcClient) Call(funcName string, args interface{}, reply interface
 		return true
 	}
 
-	fmt.Println("call error", err)
+	Log(funcName, "call error", err)
 	return false
 }
 

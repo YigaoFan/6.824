@@ -60,7 +60,7 @@ func readFrom(reader *bufio.Reader) (bool, string, []string) {
 	words := strings.Fields(line) // 这里会在 words 里保留换行符吗？
 	end := e == io.EOF
 	if !end {
-		return end, words[0], words[1:]
+		return end, words[0], words[1:] // TODO 这里有问题
 	} else {
 		return end, "", nil
 	}
@@ -85,16 +85,16 @@ func Worker(mapf func(string, string) []Pair, reducef func(string, []string) str
 
 		switch task.TaskKind {
 		case MapTaskFlag:
-			fmt.Println("get map task ", task.TaskId)
+			// fmt.Println("get map task ", task.TaskId)
 			intermediate := mapf(task.File, readFileToString(task.File))
-			fmt.Println("map task done")
+			// fmt.Println("map task done")
 			sort.Sort(ByKey(intermediate))
 			r := MapResult{TaskId: task.TaskId, Items: divideIntoItems(intermediate)}
 			client.Call("Coordinator.UploadMapResult", r, nil)
-			fmt.Println("map result upload")
+			// fmt.Println("map result upload")
 
 		case ReduceTaskFlag:
-			fmt.Println("get reduce task ", task.TaskId)
+			Log("get reduce task ", task.TaskId)
 			filename := fmt.Sprint("mr-out-", task.TaskId)
 			f, _ := os.Create(filename)
 			defer f.Close()
@@ -106,15 +106,17 @@ func Worker(mapf func(string, string) []Pair, reducef func(string, []string) str
 				if end {
 					break
 				}
+				Log("reduce func call", k)
 				// fmt.Println("key: ", k, "values: ", vs)
 
 				v := reducef(k, vs)
 				fmt.Fprintf(f, "%v %v\n", k, v)
 			}
+			Log("reduce task ", task.TaskId, "done")
 
 			result := ReduceResult{TaskId: task.TaskId, Filename: filename}
 			client.Call("Coordinator.UploadReduceResult", result, nil)
-			fmt.Println("reduce result upload")
+			Log("reduce task", task.TaskId, "result upload")
 
 		case ShutdownFlag:
 			fallthrough
