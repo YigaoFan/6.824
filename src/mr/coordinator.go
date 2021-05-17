@@ -57,15 +57,15 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 //
 func (c *Coordinator) Done(withLog bool) bool {
 	c.TaskKindLock.Lock()
+	defer c.TaskKindLock.Unlock()
 	if withLog {
 		Log("Obtain TaskKindLock")
 	}
-	defer c.TaskKindLock.Unlock()
 	c.RemainTasksCountLock.Lock()
+	defer c.RemainTasksCountLock.Unlock()
 	if withLog {
 		Log("Obtain RemainTasksCountLock")
 	}
-	defer c.RemainTasksCountLock.Unlock()
 	return c.TaskKind == ReduceTaskFlag && c.RemainTasksCount == 0
 }
 
@@ -78,25 +78,31 @@ func (c *Coordinator) RequestTask(_, task *Task) error {
 		return nil
 	}
 
-	// fmt.Println("Waiting count", len(c.WaitingTasks))s
-	t, ok := <-c.WaitingTasks
-	if !ok {
-		task.TaskKind = ShutdownFlag
-		task.File = ""
-		task.TaskId = strconv.Itoa(0)
-		return nil
-	}
+	waited := false
+	for {
+		select {
+		case t := <-c.WaitingTasks:
+			*task = Task{
+				TaskKind: t.TaskKind,
+				TaskId:   t.TaskId,
+				File:     t.File,
+			}
+			go c.assignToNewWorkerIfTimeOut(t, 10)
+			return nil
 
-	*task = Task{
-		TaskKind: t.TaskKind,
-		TaskId:   t.TaskId,
-		File:     t.File,
+		default:
+			if waited {
+				task.TaskKind = ShutdownFlag
+				task.File = ""
+				task.TaskId = strconv.Itoa(0)
+				return nil
+			} else {
+				seconds := 2
+				time.Sleep(time.Duration(seconds) * time.Second)
+				waited = true
+			}
+		}
 	}
-	// fmt.Println("Assign task", task.TaskId)
-
-	// fmt.Println("Monitor task status")
-	go c.assignToNewWorkerIfTimeOut(t, 10)
-	return nil
 }
 
 func (c *Coordinator) UploadMapResult(result MapResult, _ *struct{}) error {
@@ -129,6 +135,7 @@ func (c *Coordinator) UploadMapResult(result MapResult, _ *struct{}) error {
 	c.TaskStatus[id] = true
 	c.RemainTasksCount--
 	c.KeyValueSetLock.Lock()
+	Log("upload map task", result.TaskId)
 	for _, item := range result.Items {
 		k := item.Key
 		if ele, ok := c.KeyValueSet[k]; ok {
@@ -136,47 +143,45 @@ func (c *Coordinator) UploadMapResult(result MapResult, _ *struct{}) error {
 		} else {
 			c.KeyValueSet[k] = item.Values
 		}
-
-		if k == "A" {
-			fmt.Println("Add A :", len(item.Values))
-			fmt.Println("After add A count :", len(c.KeyValueSet[k]))
-		}
 	}
+	Log("upload map task", result.TaskId, "done")
+
 	c.KeyValueSetLock.Unlock()
 
 	if c.RemainTasksCount == 0 {
 		// 要等 KeyValueSet 的插入操作完了，才能开始下面的 setup
 		c.setupReduceTask()
-		close(c.WaitingTasks)
+		// close(c.WaitingTasks)
 	}
 
 	return nil
 }
 
 func (c *Coordinator) UploadReduceResult(result ReduceResult, _ *struct{}) error {
+	// 是不是这里也有问题？所有的地方都因为 TaskKindLock 给 block 住了？
 	Log("Try to get TaskKindLock")
 	c.TaskKindLock.Lock()
+	defer c.TaskKindLock.Unlock()
 	if c.TaskKind != ReduceTaskFlag {
 		return nil
 	}
-	c.TaskKindLock.Unlock()
 	Log("Try to get RemainTasksCountLock")
 	c.RemainTasksCountLock.Lock()
+	defer c.RemainTasksCountLock.Unlock()
 	if c.RemainTasksCount == 0 {
 		return nil
 	}
 	id, _ := strconv.Atoi(result.TaskId)
 	Log("Try to get TaskStatusLock")
 	c.TaskStatusLock.Lock()
+	defer c.TaskStatusLock.Unlock()
 	c.TaskStatusItemLock[id].Lock()
+	defer c.TaskStatusItemLock[id].Unlock()
 	if c.TaskStatus[id] == true {
 		return nil
 	}
 	c.TaskStatus[id] = true
 	c.RemainTasksCount--
-	c.TaskStatusItemLock[id].Unlock()
-	c.TaskStatusLock.Unlock()
-	c.RemainTasksCountLock.Unlock()
 
 	return nil
 }
@@ -226,7 +231,7 @@ func (c *Coordinator) setupMapTask(files []string) {
 	n := len(files)
 	c.TaskKind = MapTaskFlag
 	c.RemainTasksCount = n
-	c.WaitingTasks = make(chan Task, len(files))
+	c.WaitingTasks = make(chan Task, len(files)*2) // 这里也有可能阻塞。。。真是好多地方可以卡住，再想想这个问题及程序
 	c.TaskStatus = make([]bool, n)
 	c.TaskStatusItemLock = make([]sync.Mutex, n)
 
@@ -275,10 +280,9 @@ func (c *Coordinator) setupReduceTask() {
 
 	// 想一下，当某个任务失败时，这些文件怎么处理
 	for i := 0; i < n; i++ {
-		// fmt.Println("prepare reduce task ", i)
+		// Log("prepare reduce task ", i)
 		c.TaskStatus[i] = false
 		filename := getReduceArgFilenameOf(i)
-		// below chan will ref this i, so copy to j
 		t := Task{
 			File:     filename,
 			TaskId:   strconv.Itoa(i),
@@ -298,16 +302,15 @@ func appendLineTo(writer io.Writer, key string, values []string) {
 	}
 
 	write(key + " ")
-	if key == "A" {
-		fmt.Println("print A values count:", len(values))
-	}
 	write(strings.Join(values, " "))
 	write("\n")
 }
 
 func (c *Coordinator) assignToNewWorkerIfTimeOut(task Task, seconds int) {
 	time.Sleep(time.Duration(seconds) * time.Second)
+	// 这里的锁可能有点问题
 	c.TaskKindLock.Lock()
+	defer c.TaskKindLock.Unlock()
 	if c.TaskKind != task.TaskKind {
 		return
 	}
@@ -316,18 +319,19 @@ func (c *Coordinator) assignToNewWorkerIfTimeOut(task Task, seconds int) {
 	c.TaskStatusLock.Lock()
 	c.TaskStatusItemLock[id].Lock()
 	done := c.TaskStatus[id]
-	c.TaskStatusItemLock[id].Unlock()
-	c.TaskStatusLock.Unlock()
-	c.TaskKindLock.Unlock()
-
 	if !done {
+		// Log("assign new: require closed lock")
+		// c.WaitingTaskClosedLock.Lock()
+		// if !c.WaitingTaskClosed {
 		c.WaitingTasks <- task
 		go c.assignToNewWorkerIfTimeOut(task, seconds)
+		// }
+		// c.WaitingTaskClosedLock.Unlock()
+		// Log("assign new: unlock closed lock")
 	}
+	c.TaskStatusItemLock[id].Unlock()
+	c.TaskStatusLock.Unlock()
+
 }
 
 // 使用互斥量互斥访问一些共享变量以及一些可能共同调用的过程，比如 setupReduceTask()
-
-func Log(message string) {
-	// fmt.Println(message)
-}
