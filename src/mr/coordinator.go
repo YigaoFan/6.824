@@ -151,7 +151,7 @@ func (c *Coordinator) UploadMapResult(result MapResult, _ *struct{}) error {
 	if c.RemainTasksCount == 0 {
 		// 要等 KeyValueSet 的插入操作完了，才能开始下面的 setup
 		c.setupReduceTask()
-		// close(c.WaitingTasks)
+		// close(c.WaitingTasks) 这里不应该预定 close 的，因为任务监控那部分可能会附加任务
 	}
 
 	return nil
